@@ -1,0 +1,298 @@
+File: requirements.txt
+pandas
+numpy
+scikit-learn
+joblib
+streamlit
+openpyxl
+
+File: data_gen.py
+"""
+Generate synthetic dataset for AI-Enhanced-Climate-Education-Tools.
+
+Outputs:
+- synthetic_climate_edu.csv
+- synthetic_climate_edu.xlsx
+"""
+import random
+import numpy as np
+import pandas as pd
+
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+
+TOPICS = [
+    "Climate Basics", "Carbon Cycle", "Renewable Energy",
+    "Climate Policy", "Climate Justice", "Extreme Weather",
+    "Ecosystems & Biodiversity", "Sustainable Cities"
+]
+
+MODULES = {
+    "Climate Basics": ["Intro Quiz", "Basics Module", "Interactive Game"],
+    "Carbon Cycle": ["Carbon Diagram", "Lab Simulation", "Quiz A"],
+    "Renewable Energy": ["Solar Activity", "Wind Lab", "Project"],
+    "Climate Policy": ["Policy Debate", "Timeline", "Essay"],
+    "Climate Justice": ["Case Study", "Discussion", "Project"],
+    "Extreme Weather": ["Simulation", "Safety Plan", "Quiz B"],
+    "Ecosystems & Biodiversity": ["Field Virtual Lab", "Quiz C", "Project"],
+    "Sustainable Cities": ["Design Challenge", "Urban Case", "Quiz D"]
+}
+
+def generate_row(student_id):
+    age = int(np.clip(np.random.normal(15, 2), 10, 19))  # typical middle-high school
+    grade_level = np.random.choice(["6-8", "9-10", "11-12"], p=[0.25, 0.5, 0.25])
+    prior_knowledge_score = float(np.clip(np.random.beta(2,5)*100, 0, 100))  # skewed low
+    lesson_topic = np.random.choice(TOPICS)
+    hours_spent = float(np.clip(np.random.exponential(scale=1.5), 0, 10))
+    interactive_activities = np.random.poisson(1)  # number of interactive activities completed
+    engagement_score = float(np.clip(
+        0.4*prior_knowledge_score/100 + 0.3*(hours_spent/5) + 0.2*(interactive_activities/3) + np.random.normal(0,0.15),
+        0, 1
+    ))
+    # quiz_score influenced by prior knowledge, engagement, and some topic difficulty noise
+    topic_difficulty = {"Climate Basics": -2, "Carbon Cycle": -5, "Renewable Energy": 0, "Climate Policy": -3,
+                        "Climate Justice": -1, "Extreme Weather": -4, "Ecosystems & Biodiversity": -2, "Sustainable Cities": 1}
+    base = 0.5*prior_knowledge_score + 30*engagement_score + 5*interactive_activities + np.random.normal(0,8)
+    quiz_score = float(np.clip(base + topic_difficulty.get(lesson_topic, 0), 0, 100))
+    mastered = int(quiz_score >= 70)  # binary target: mastery threshold
+    recommended_next_module = np.random.choice(MODULES[lesson_topic])
+
+    return {
+        "student_id": student_id,
+        "age": age,
+        "grade_level": grade_level,
+        "prior_knowledge_score": round(prior_knowledge_score, 2),
+        "lesson_topic": lesson_topic,
+        "hours_spent": round(hours_spent, 2),
+        "interactive_activities": int(interactive_activities),
+        "engagement_score": round(engagement_score, 3),
+        "quiz_score": round(quiz_score, 2),
+        "mastered": mastered,
+        "recommended_next_module": recommended_next_module
+    }
+
+def generate_dataset(n=2000, out_csv="synthetic_climate_edu.csv", out_xlsx="synthetic_climate_edu.xlsx"):
+    rows = [generate_row(i+1) for i in range(n)]
+    df = pd.DataFrame(rows)
+    df.to_csv(out_csv, index=False)
+    df.to_excel(out_xlsx, index=False)
+    print(f"Saved {n} rows to {out_csv} and {out_xlsx}")
+    return df
+
+if __name__ == "__main__":
+    generate_dataset()
+
+File: train_model.py
+"""
+Train a classifier to predict 'mastered' (binary) and save the model and feature pipeline.
+"""
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score, roc_auc_score, classification_report
+import joblib
+
+DATA_PATH = "synthetic_climate_edu.csv"
+MODEL_PATH = "mastery_model.joblib"
+
+def load_data(path=DATA_PATH):
+    df = pd.read_csv(path)
+    return df
+
+def build_and_train(df):
+    # features and target
+    X = df[["age", "grade_level", "prior_knowledge_score", "lesson_topic", "hours_spent", "interactive_activities", "engagement_score"]]
+    y = df["mastered"]
+
+    # split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+    numeric_features = ["age", "prior_knowledge_score", "hours_spent", "interactive_activities", "engagement_score"]
+    categorical_features = ["grade_level", "lesson_topic"]
+
+    preprocessor = ColumnTransformer([
+        ("num", StandardScaler(), numeric_features),
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features)
+    ])
+
+    clf = Pipeline([
+        ("pre", preprocessor),
+        ("rf", RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=-1))
+    ])
+
+    clf.fit(X_train, y_train)
+    preds = clf.predict(X_test)
+    probas = clf.predict_proba(X_test)[:,1]
+
+    acc = accuracy_score(y_test, preds)
+    auc = roc_auc_score(y_test, probas)
+    report = classification_report(y_test, preds)
+
+    print("Accuracy:", round(acc,4))
+    print("ROC AUC:", round(auc,4))
+    print("Classification report:\n", report)
+
+    joblib.dump(clf, MODEL_PATH)
+    print(f"Saved trained model to {MODEL_PATH}")
+    return clf
+
+if __name__ == "__main__":
+    df = load_data()
+    build_and_train(df)
+
+File: app.py (Streamlit demo)
+"""
+Streamlit app to explore predictions + simple personalized recommendation.
+Run: streamlit run app.py
+"""
+import streamlit as st
+import pandas as pd
+import joblib
+import numpy as np
+
+MODEL_PATH = "mastery_model.joblib"
+DATA_PATH = "synthetic_climate_edu.csv"
+
+st.set_page_config(page_title="AI-Enhanced Climate Education Tools", layout="wide")
+
+@st.cache_data
+def load_model():
+    return joblib.load(MODEL_PATH)
+
+@st.cache_data
+def load_data():
+    return pd.read_csv(DATA_PATH)
+
+model = None
+try:
+    model = load_model()
+except Exception as e:
+    st.warning("Model not found. Please run train_model.py to create the model first.")
+    st.write(e)
+
+st.title("AI-Enhanced Climate Education — Demo")
+st.markdown("Upload a CSV or use the synthetic dataset to see mastery predictions and recommended next modules.")
+
+df = load_data()
+st.sidebar.header("Controls")
+row_count = st.sidebar.slider("Show rows", min_value=5, max_value=200, value=20)
+topic_filter = st.sidebar.multiselect("Filter topics", options=sorted(df['lesson_topic'].unique()), default=None)
+if topic_filter:
+    df_show = df[df['lesson_topic'].isin(topic_filter)]
+else:
+    df_show = df
+
+st.subheader("Dataset sample")
+st.dataframe(df_show.sample(min(row_count, len(df_show))).reset_index(drop=True))
+
+st.subheader("Predict mastery for a new / custom student")
+with st.form("predict_form"):
+    col1, col2 = st.columns(2)
+    with col1:
+        age = st.number_input("Age", min_value=10, max_value=25, value=15)
+        grade_level = st.selectbox("Grade level", options=["6-8","9-10","11-12"])
+        prior_knowledge_score = st.slider("Prior knowledge (0-100)", 0.0, 100.0, 40.0)
+        lesson_topic = st.selectbox("Lesson topic", options=sorted(df['lesson_topic'].unique()))
+    with col2:
+        hours_spent = st.number_input("Hours spent", min_value=0.0, max_value=20.0, value=1.0, step=0.25)
+        interactive_activities = st.number_input("Interactive activities completed", min_value=0, max_value=10, value=1)
+        engagement_score = st.slider("Observed engagement (0-1)", 0.0, 1.0, 0.3)
+    submitted = st.form_submit_button("Predict")
+
+if submitted:
+    if model is None:
+        st.error("Model not available. Train the model first (run `python train_model.py`).")
+    else:
+        X_new = pd.DataFrame([{
+            "age": age,
+            "grade_level": grade_level,
+            "prior_knowledge_score": prior_knowledge_score,
+            "lesson_topic": lesson_topic,
+            "hours_spent": hours_spent,
+            "interactive_activities": interactive_activities,
+            "engagement_score": engagement_score
+        }])
+        proba = model.predict_proba(X_new)[:,1][0]
+        pred = int(proba >= 0.5)
+        st.metric("Predicted probability of mastery", f"{proba:.2f}")
+        st.success("Likely mastered ✅" if pred==1 else "Not yet mastered ❌")
+
+        # Simple "recommendation" logic: suggest next module for topic and remediation if low prob.
+        topic_rows = df[df['lesson_topic']==lesson_topic]
+        # recommend the most common next module in dataset for that topic
+        rec = topic_rows['recommended_next_module'].mode().iloc[0] if len(topic_rows)>0 else "Suggested reading"
+        if proba < 0.6:
+            st.info("Recommendation: targeted remediation + interactive module")
+            st.write(f"- Suggested next module: **{rec}**")
+            st.write("- Suggested action: provide extra interactive activity and a short formative quiz.")
+        else:
+            st.info("Recommendation: advance to next challenge")
+            st.write(f"- Suggested next module: **{rec}**")
+            st.write("- Suggested action: assign project or peer-teaching activity.")
+
+Optional utility: predict_batch.py
+"""
+Load saved model and predict mastery for CSV of students, output CSV with predictions.
+"""
+import pandas as pd
+import joblib
+
+MODEL_PATH = "mastery_model.joblib"
+INPUT = "synthetic_climate_edu.csv"
+OUTPUT = "predictions_with_mastery.csv"
+
+def batch_predict(input_csv=INPUT, output_csv=OUTPUT):
+    df = pd.read_csv(input_csv)
+    model = joblib.load(MODEL_PATH)
+    X = df[["age", "grade_level", "prior_knowledge_score", "lesson_topic", "hours_spent", "interactive_activities", "engagement_score"]]
+    proba = model.predict_proba(X)[:,1]
+    df['pred_mastery_proba'] = proba
+    df['pred_mastered'] = (proba >= 0.5).astype(int)
+    df.to_csv(output_csv, index=False)
+    print(f"Saved predictions to {output_csv}")
+
+if __name__ == "__main__":
+    batch_predict()
+
+README quick-start (use as README.md)
+# AI-Enhanced-Climate-Education-Tools
+
+Quick start:
+1. Create a virtual env and install requirements:
+   python -m venv venv
+   source venv/bin/activate    # or venv\Scripts\activate on Windows
+   pip install -r requirements.txt
+
+2. Generate synthetic data:
+   python data_gen.py
+
+3. Train model:
+   python train_model.py
+
+4. Run demo app:
+   streamlit run app.py
+
+Files:
+- data_gen.py: creates synthetic_climate_edu.csv and .xlsx
+- train_model.py: trains RandomForest classifier and saves mastery_model.joblib
+- app.py: Streamlit demo to predict and recommend
+- predict_batch.py: batch prediction utility
+
+Notes & extensions (brief)
+
+Dataset is synthetic and intended for prototyping — adjust distributions to better match your learners.
+
+Extensions you might add:
+
+A regression model to predict quiz_score directly.
+
+A sequence model to recommend next topics based on learning trajectories.
+
+More advanced recommendations (content-based filtering, collaborative filtering, or reinforcement learning for curriculum sequencing).
+
+Integrate with a real LMS (LTI) or host a REST API (FastAPI) to power a production front-end.
